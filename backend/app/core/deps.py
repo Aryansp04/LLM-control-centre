@@ -15,9 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import IS_VERCEL, get_settings
 from app.core.errors import AppError
-from app.core.security import decode_access_token, hash_password
+from app.core.security import decode_access_token, hash_password, unseal_account_cookie
 from app.database import engine, get_db
-from app.models.entities import User
+from app.models.entities import LLMModel, Provider, User
 from app.redis_client import redis_manager
 from app.services.bootstrap import (
     ensure_user_workspace_initialized,
@@ -25,6 +25,7 @@ from app.services.bootstrap import (
 )
 
 bearer_scheme = HTTPBearer(auto_error=False)
+VAULT_SEAL_COOKIE = "llmcc_vault_seal"
 
 
 async def get_current_user_and_token(
@@ -123,6 +124,54 @@ async def get_current_user_and_token(
             message="User account not found or inactive.",
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
+
+    # Restore user's encrypted vault keys on cold serverless containers if present in HttpOnly seal
+    if IS_VERCEL and engine.dialect.name == "sqlite":
+        raw_vault_cookie = request.cookies.get(VAULT_SEAL_COOKIE, "")
+        if raw_vault_cookie:
+            vault_payload = unseal_account_cookie(raw_vault_cookie)
+            if (
+                vault_payload
+                and vault_payload.get("uid") == str(user.id)
+                and isinstance(vault_payload.get("keys"), dict)
+                and vault_payload["keys"]
+            ):
+                await ensure_user_workspace_initialized(db, user)
+                provs = list(
+                    (
+                        await db.execute(
+                            select(Provider).where(Provider.user_id == user.id)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                updated_any = False
+                for p in provs:
+                    enc_val = vault_payload["keys"].get(p.provider_key)
+                    if enc_val and not p.encrypted_api_key:
+                        p.encrypted_api_key = str(enc_val)
+                        p.key_hint = "••••••••••••••••"
+                        p.account_status = "verified"
+                        p.status = "operational"
+                        updated_any = True
+                        models = list(
+                            (
+                                await db.execute(
+                                    select(LLMModel).where(
+                                        LLMModel.user_id == user.id,
+                                        LLMModel.provider_id == p.id,
+                                    )
+                                )
+                            )
+                            .scalars()
+                            .all()
+                        )
+                        for m in models:
+                            if m.status == "unconfigured":
+                                m.status = "configured"
+                if updated_any:
+                    await db.commit()
 
     return user, payload
 

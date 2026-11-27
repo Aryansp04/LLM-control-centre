@@ -108,8 +108,8 @@ async def _seed_user_workspace(db: AsyncSession, user: User) -> None:
                 display_name=adapter.display_name,
                 key_hint=mask_api_key(env_key) if env_key else None,
                 is_enabled=True,
-                status="unknown",
-                account_status="configured" if has_env else "unconfigured",
+                status="operational" if has_env else "unknown",
+                account_status="verified" if has_env else "unconfigured",
                 capabilities_json=asdict(caps),
             )
             db.add(provider_row)
@@ -119,8 +119,10 @@ async def _seed_user_workspace(db: AsyncSession, user: User) -> None:
             provider_row.capabilities_json = asdict(caps)
             if not provider_row.encrypted_api_key and env_key:
                 provider_row.key_hint = mask_api_key(env_key)
-                if provider_row.account_status == "unconfigured":
-                    provider_row.account_status = "configured"
+                if provider_row.account_status in ("unconfigured", "configured"):
+                    provider_row.account_status = "verified"
+                if provider_row.status == "unknown":
+                    provider_row.status = "operational"
 
         has_credentials = bool(provider_row.encrypted_api_key or env_key)
         catalog_ids = {s.model_id for s in adapter.get_default_models()}

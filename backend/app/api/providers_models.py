@@ -6,13 +6,14 @@ import uuid
 from decimal import Decimal
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import enforce_api_rate_limit
+from app.config import IS_VERCEL, get_settings
+from app.core.deps import VAULT_SEAL_COOKIE, enforce_api_rate_limit
 from app.core.errors import AppError
-from app.core.security import encrypt_api_key, mask_api_key
+from app.core.security import encrypt_api_key, mask_api_key, seal_account_cookie
 from app.database import get_db
 from app.models.entities import LLMModel, Provider, User
 from app.providers.registry import provider_registry
@@ -130,6 +131,7 @@ async def list_providers(
 async def update_provider_credentials(
     provider_key: str,
     payload: ProviderUpdateCredentialsRequest,
+    response: Response,
     user: User = Depends(enforce_api_rate_limit),
     db: AsyncSession = Depends(get_db),
 ) -> ProviderResponse:
@@ -194,6 +196,31 @@ async def update_provider_credentials(
             m.status = "configured"
 
     await db.commit()
+
+    # Seal encrypted user vault keys into HttpOnly cookie so cold serverless instances retain them
+    all_user_provs = list(
+        (
+            await db.execute(select(Provider).where(Provider.user_id == user.id))
+        )
+        .scalars()
+        .all()
+    )
+    vault_map = {
+        p.provider_key: p.encrypted_api_key
+        for p in all_user_provs
+        if p.encrypted_api_key
+    }
+    settings = get_settings()
+    sealed_vault = seal_account_cookie({"uid": str(user.id), "keys": vault_map})
+    response.set_cookie(
+        key=VAULT_SEAL_COOKIE,
+        value=sealed_vault,
+        max_age=30 * 24 * 3600,
+        httponly=True,
+        secure=IS_VERCEL or settings.is_production,
+        samesite="lax",
+        path="/",
+    )
 
     if payload.verify_immediately and has_creds and prov.is_enabled:
         await run_monitoring_checks_for_user(
