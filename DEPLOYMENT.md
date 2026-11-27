@@ -9,6 +9,25 @@
 
 ---
 
+## 0. One-Click Full-Stack Deployment on Vercel (Recommended)
+
+This repository is pre-configured at the root (`vercel.json`, `api/index.py`, and `requirements.txt`) to deploy **both** the Vite React frontend (`frontend/dist`) and the Python FastAPI backend (`/api/*`, `/health`, `/ready`) in a **single Vercel project**:
+
+1. Go to **https://vercel.com/new** and import `Aryansp04/LLM-control-centre`.
+2. Leave **Root Directory** as `./` (default) — `vercel.json` automatically builds `frontend/` and mounts `api/index.py` as a 60s Python Serverless Function.
+3. Add the following **Environment Variables** in Vercel Project Settings (all server-side only — **never** prefix secrets with `VITE_`):
+   - `JWT_SECRET_KEY` — 64-char random secret
+   - `ENCRYPTION_SECRET_KEY` — 32+ char random secret for Fernet vault
+   - `GEMINI_API_KEY` *(optional server-side key)*
+   - `OPENAI_API_KEY` *(optional server-side key)*
+   - `ANTHROPIC_API_KEY` *(optional server-side key)*
+4. **Persistent Storage (Recommended for Production)**:
+   - Connect **Vercel Postgres / Neon** from the Vercel Storage tab (`POSTGRES_URL` / `DATABASE_URL` with `sslmode=require` is auto-detected and normalized for `asyncpg` with `NullPool`).
+   - Connect **Upstash Redis / Vercel KV** (`KV_URL` / `REDIS_URL` is auto-detected; falls back safely if omitted).
+5. Click **Deploy**.
+
+---
+
 ## 1. Local Docker Compose Deployment
 
 1. Copy `.env.example` to `.env`:

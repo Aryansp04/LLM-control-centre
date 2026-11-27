@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import List
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = Path(__file__).resolve().parents[1]
+IS_VERCEL = bool(os.getenv("VERCEL"))
 
 
 class Settings(BaseSettings):
@@ -70,10 +73,48 @@ class Settings(BaseSettings):
             return value
         val = value.strip()
         if val.startswith("postgres://"):
-            return "postgresql+asyncpg://" + val[len("postgres://") :]
-        if val.startswith("postgresql://") and "+asyncpg" not in val:
-            return "postgresql+asyncpg://" + val[len("postgresql://") :]
+            val = "postgresql+asyncpg://" + val[len("postgres://") :]
+        elif val.startswith("postgresql://") and "+asyncpg" not in val:
+            val = "postgresql+asyncpg://" + val[len("postgresql://") :]
+
+        # Convert libpq sslmode/channel_binding query params to asyncpg-compatible params
+        if val.startswith("postgresql+asyncpg://") and "?" in val:
+            parts = urlsplit(val)
+            raw_params = parse_qsl(parts.query, keep_blank_values=True)
+            cleaned_params = []
+            for k, v in raw_params:
+                if k == "sslmode":
+                    if v != "disable":
+                        cleaned_params.append(("ssl", "require"))
+                elif k == "channel_binding":
+                    continue
+                else:
+                    cleaned_params.append((k, v))
+            val = urlunsplit(
+                (parts.scheme, parts.netloc, parts.path, urlencode(cleaned_params), parts.fragment)
+            )
         return val
+
+    @model_validator(mode="after")
+    def apply_vercel_serverless_defaults(self) -> "Settings":
+        if IS_VERCEL:
+            # Support Vercel Postgres / Neon `POSTGRES_URL` automatically
+            pg_env = os.getenv("POSTGRES_URL") or os.getenv("POSTGRES_PRISMA_URL")
+            if pg_env and not os.getenv("DATABASE_URL"):
+                self.database_url = self.normalize_database_url(pg_env)
+            elif not os.getenv("DATABASE_URL") and "localhost" in self.database_url:
+                self.database_url = "sqlite+aiosqlite:////tmp/llm_control_center.db"
+
+            # Support Vercel KV / Upstash `KV_URL` automatically, or safe memory fallback
+            kv_env = os.getenv("KV_URL")
+            if kv_env and not os.getenv("REDIS_URL"):
+                self.redis_url = kv_env
+            elif not os.getenv("REDIS_URL") and "localhost" in self.redis_url:
+                self.redis_url = "memory://vercel"
+
+            # Serverless invocations must not spawn infinite background loops
+            self.background_monitoring_enabled = False
+        return self
 
     @property
     def cors_origins_list(self) -> List[str]:

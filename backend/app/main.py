@@ -6,7 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import analytics, auth, chat, monitoring, providers_models
@@ -17,13 +17,29 @@ from app.database import init_db
 from app.redis_client import redis_manager
 from app.services.monitoring import background_monitoring_loop
 
+_runtime_initialized = False
+_runtime_lock = asyncio.Lock()
+
+
+async def ensure_runtime_initialized() -> None:
+    global _runtime_initialized
+    if _runtime_initialized:
+        return
+    async with _runtime_lock:
+        if _runtime_initialized:
+            return
+        settings = get_settings()
+        configure_secure_logging(settings.log_level)
+        await init_db()
+        if redis_manager.client is None:
+            await redis_manager.connect()
+        _runtime_initialized = True
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     settings = get_settings()
-    configure_secure_logging(settings.log_level)
-    await init_db()
-    await redis_manager.connect()
+    await ensure_runtime_initialized()
 
     stop_event = asyncio.Event()
     monitor_task: asyncio.Task | None = None
@@ -55,10 +71,16 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    @app.middleware("http")
+    async def serverless_lazy_init_middleware(request: Request, call_next):
+        await ensure_runtime_initialized()
+        return await call_next(request)
+
     app.add_middleware(SecurityAndRequestMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,
+        allow_origin_regex=r"https://.*\.vercel\.app",
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-Request-ID"],

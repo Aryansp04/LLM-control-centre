@@ -13,9 +13,9 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool, StaticPool
 
-from app.config import get_settings
+from app.config import IS_VERCEL, get_settings
 
 
 class Base(DeclarativeBase):
@@ -40,6 +40,10 @@ def build_engine(database_url: str | None = None) -> AsyncEngine:
             cursor.close()
 
         return engine
+
+    if IS_VERCEL:
+        # Use NullPool on serverless functions to avoid cross-event-loop asyncpg pool errors
+        return create_async_engine(url, poolclass=NullPool, future=True)
 
     return create_async_engine(
         url,

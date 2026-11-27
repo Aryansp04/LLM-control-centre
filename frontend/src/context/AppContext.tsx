@@ -166,7 +166,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({
           void refreshPlatformState();
         }
       },
-      (st) => setWsState(st)
+      (st) => setWsState(st),
+      () => void refreshPlatformState()
     );
     socketRef.current = sock;
     sock.connect();

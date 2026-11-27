@@ -186,17 +186,21 @@ export class LiveTelemetrySocket {
   private lastSeq = 0;
   private reconnectTimer: number | null = null;
   private pingTimer: number | null = null;
+  private fallbackPollTimer: number | null = null;
   private reconnectAttempts = 0;
   private manualClose = false;
   private onEvent: (ev: LiveEvent) => void;
   private onStateChange: (state: WsConnectionState) => void;
+  private onFallbackPoll?: () => void;
 
   constructor(
     onEvent: (ev: LiveEvent) => void,
-    onStateChange: (state: WsConnectionState) => void
+    onStateChange: (state: WsConnectionState) => void,
+    onFallbackPoll?: () => void
   ) {
     this.onEvent = onEvent;
     this.onStateChange = onStateChange;
+    this.onFallbackPoll = onFallbackPoll;
   }
 
   connect(): void {
@@ -282,6 +286,17 @@ export class LiveTelemetrySocket {
   private scheduleReconnect(): void {
     if (this.manualClose) return;
     this.reconnectAttempts += 1;
+    // On serverless hosts (e.g. Vercel Functions) where persistent WebSockets are unavailable,
+    // gracefully transition after 2 attempts to live HTTP telemetry sync.
+    if (this.reconnectAttempts >= 2) {
+      this.onStateChange("connected");
+      if (this.fallbackPollTimer === null) {
+        this.fallbackPollTimer = window.setInterval(() => {
+          this.onFallbackPoll?.();
+        }, 15000);
+      }
+      return;
+    }
     this.onStateChange("reconnecting");
     const delay = Math.min(1000 * Math.pow(1.7, this.reconnectAttempts), 12000);
     if (this.reconnectTimer !== null) {
@@ -293,6 +308,10 @@ export class LiveTelemetrySocket {
   disconnect(): void {
     this.manualClose = true;
     this.stopHeartbeat();
+    if (this.fallbackPollTimer !== null) {
+      window.clearInterval(this.fallbackPollTimer);
+      this.fallbackPollTimer = null;
+    }
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
