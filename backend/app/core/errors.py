@@ -72,7 +72,14 @@ class SecurityAndRequestMiddleware(BaseHTTPMiddleware):
             "geolocation=(), microphone=(), camera=()"
         )
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; frame-ancestors 'none'"
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com data:; "
+            "media-src 'self' https://d8j0ntlcm91z4.cloudfront.net blob:; "
+            "img-src 'self' data: blob: https:; "
+            "connect-src 'self' https: wss: ws:; "
+            "frame-ancestors 'none'"
         )
         if settings.is_production:
             response.headers["Strict-Transport-Security"] = (

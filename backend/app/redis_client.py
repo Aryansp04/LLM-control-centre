@@ -38,11 +38,20 @@ class RedisManager:
         url = (redis_url or settings.redis_url).strip()
         self._redis_url = url
 
-        if url.startswith("memory://"):
-            import fakeredis.aioredis
+        if url == "memory://vercel":
+            self._client = None
+            self._mode = "serverless-memory"
+            return
 
-            self._client = fakeredis.aioredis.FakeRedis(decode_responses=True)
-            self._mode = "memory"
+        if url.startswith("memory://"):
+            try:
+                import fakeredis.aioredis
+
+                self._client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+                self._mode = "memory"
+            except ImportError:
+                self._client = None
+                self._mode = "serverless-memory"
             return
 
         self._mode = "remote"
@@ -68,8 +77,17 @@ class RedisManager:
 
     async def check_health(self) -> Dict[str, Any]:
         started = time.perf_counter()
-        if self._client is None:
+        if self._client is None and self._mode != "serverless-memory":
             await self.connect()
+        if self._mode == "serverless-memory":
+            latency_ms = round((time.perf_counter() - started) * 1000.0, 2)
+            return {
+                "status": "operational",
+                "healthy": True,
+                "mode": self._mode,
+                "latency_ms": latency_ms,
+                "error": None,
+            }
         try:
             assert self._client is not None
             pong = await self._client.ping()

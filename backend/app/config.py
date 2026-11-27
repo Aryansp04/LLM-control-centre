@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 from typing import List
@@ -13,7 +14,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = Path(__file__).resolve().parents[1]
-IS_VERCEL = bool(os.getenv("VERCEL"))
+IS_VERCEL = bool(
+    os.getenv("VERCEL")
+    or os.getenv("VERCEL_ENV")
+    or os.getenv("VERCEL_URL")
+    or os.getenv("AWS_LAMBDA_FUNCTION_NAME")
+)
 
 
 class Settings(BaseSettings):
@@ -99,17 +105,31 @@ class Settings(BaseSettings):
     def apply_vercel_serverless_defaults(self) -> "Settings":
         if IS_VERCEL:
             # Support Vercel Postgres / Neon `POSTGRES_URL` automatically
-            pg_env = os.getenv("POSTGRES_URL") or os.getenv("POSTGRES_PRISMA_URL")
+            pg_env = (
+                os.getenv("POSTGRES_URL")
+                or os.getenv("POSTGRES_PRISMA_URL")
+                or os.getenv("POSTGRES_URL_NON_POOLING")
+            )
             if pg_env and not os.getenv("DATABASE_URL"):
                 self.database_url = self.normalize_database_url(pg_env)
-            elif not os.getenv("DATABASE_URL") and "localhost" in self.database_url:
-                self.database_url = "sqlite+aiosqlite:////tmp/llm_control_center.db"
+            elif not os.getenv("DATABASE_URL") or "localhost" in self.database_url or "127.0.0.1" in self.database_url:
+                tmp_db = (Path(tempfile.gettempdir()) / "llm_control_center.db").resolve().as_posix()
+                prefix = "sqlite+aiosqlite:///" if tmp_db[1:2] == ":" else "sqlite+aiosqlite:////"
+                self.database_url = f"{prefix}{tmp_db.lstrip('/')}"
 
-            # Support Vercel KV / Upstash `KV_URL` automatically, or safe memory fallback
-            kv_env = os.getenv("KV_URL")
-            if kv_env and not os.getenv("REDIS_URL"):
+            # Support Vercel KV / Upstash `KV_URL` (only redis:// or rediss://) or safe memory fallback
+            kv_env = (os.getenv("KV_URL") or "").strip()
+            if (
+                kv_env.startswith(("redis://", "rediss://"))
+                and not os.getenv("REDIS_URL")
+            ):
                 self.redis_url = kv_env
-            elif not os.getenv("REDIS_URL") and "localhost" in self.redis_url:
+            elif (
+                not os.getenv("REDIS_URL")
+                or "localhost" in self.redis_url
+                or "127.0.0.1" in self.redis_url
+                or not self.redis_url.startswith(("redis://", "rediss://", "memory://"))
+            ):
                 self.redis_url = "memory://vercel"
 
             # Serverless invocations must not spawn infinite background loops

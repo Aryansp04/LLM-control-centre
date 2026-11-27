@@ -31,6 +31,8 @@ def build_engine(database_url: str | None = None) -> AsyncEngine:
         kwargs: Dict[str, Any] = {"connect_args": connect_args}
         if ":memory:" in url:
             kwargs["poolclass"] = StaticPool
+        elif IS_VERCEL:
+            kwargs["poolclass"] = NullPool
         engine = create_async_engine(url, future=True, **kwargs)
 
         @event.listens_for(engine.sync_engine, "connect")
