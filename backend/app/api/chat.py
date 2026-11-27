@@ -147,7 +147,7 @@ async def create_chat_completion(
             )
         except ProviderError as primary_exc:
             if (
-                primary_exc.error_type == "quota_exceeded"
+                primary_exc.error_type in ("quota_exceeded", "provider_unavailable", "model_not_found")
                 and getattr(adapter, "_transport", None) is None
             ):
                 failover = await resolve_live_quota_failover(

@@ -527,20 +527,26 @@ def _sse_frame(event: str, data: Dict[str, Any]) -> str:
 async def resolve_live_quota_failover(
     user_id: uuid.UUID, failed_provider_key: str, requested_model: str
 ) -> Optional[Tuple[Provider, str, str]]:
-    """Find an active funded fallback provider (e.g. Gemini) when upstream billing credits are 0."""
+    """Find an active funded fallback provider/model when upstream billing is 0 or experiencing 503 spikes."""
     async with open_session() as db:
         provs = (
             await db.execute(
                 select(Provider).where(
                     Provider.user_id == user_id,
                     Provider.is_enabled.is_(True),
-                    Provider.provider_key != failed_provider_key,
                 )
             )
         ).scalars().all()
-        # Prefer gemini first since it is verified operational
+        # Prefer gemini-3.1-flash-lite-preview first since it is verified fast and operational
         ordered = sorted(provs, key=lambda p: 0 if p.provider_key == "gemini" else 1)
         for cand in ordered:
+            if (
+                cand.provider_key == failed_provider_key
+                and requested_model == "gemini-3.1-flash-lite-preview"
+            ):
+                continue
+            if cand.provider_key == failed_provider_key and cand.provider_key != "gemini":
+                continue
             cand_key, _ = resolve_provider_api_key(cand)
             if not cand_key or not provider_registry.has(cand.provider_key):
                 continue
@@ -548,10 +554,7 @@ async def resolve_live_quota_failover(
             if getattr(cand_adapter, "_transport", None) is not None:
                 continue
             if cand.provider_key == "gemini":
-                is_light = any(t in requested_model.lower() for t in ("mini", "haiku", "lite"))
-                relay_model = (
-                    "gemini-3.1-flash-lite-preview" if is_light else "gemini-3-flash-preview"
-                )
+                relay_model = "gemini-3.1-flash-lite-preview"
             else:
                 specs = cand_adapter.get_default_models()
                 relay_model = specs[0].model_id if specs else "gpt-4o-mini"
@@ -691,7 +694,7 @@ async def stream_chat_sse(
                         )
         except ProviderError as primary_exc:
             if (
-                primary_exc.error_type == "quota_exceeded"
+                primary_exc.error_type in ("quota_exceeded", "provider_unavailable", "model_not_found")
                 and not accumulated
                 and getattr(adapter, "_transport", None) is None
             ):
