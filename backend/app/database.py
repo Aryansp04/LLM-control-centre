@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import ssl
 import time
+import weakref
 from typing import Any, AsyncGenerator, Dict
 
 from sqlalchemy import event, text
@@ -58,10 +60,13 @@ def build_engine(database_url: str | None = None) -> AsyncEngine:
         pg_connect_args["ssl"] = ssl.create_default_context()
 
     if IS_VERCEL:
-        # Use NullPool + statement_cache_size=0 for Neon PgBouncer & serverless event loops
+        # Small loop-scoped pool reuses TLS/SCRAM Postgres connections across all queries in a request
         return create_async_engine(
             url,
-            poolclass=NullPool,
+            pool_size=2,
+            max_overflow=4,
+            pool_pre_ping=True,
+            pool_recycle=120,
             connect_args=pg_connect_args,
             future=True,
         )
@@ -83,11 +88,19 @@ AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
     expire_on_commit=False,
     autoflush=False,
 )
+_loop_session_makers: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, async_sessionmaker[AsyncSession]]" = (
+    weakref.WeakKeyDictionary()
+)
+_custom_reconfigured: bool = False
+_schema_verified: bool = False
 
 
 def reconfigure_database(database_url: str) -> None:
     """Rebind engine and session maker (used in isolated tests or runtime overrides)."""
-    global engine, AsyncSessionLocal
+    global engine, AsyncSessionLocal, _custom_reconfigured, _schema_verified
+    _custom_reconfigured = True
+    _schema_verified = False
+    _loop_session_makers.clear()
     engine = build_engine(database_url)
     AsyncSessionLocal = async_sessionmaker(
         bind=engine,
@@ -98,7 +111,23 @@ def reconfigure_database(database_url: str) -> None:
 
 
 def open_session() -> AsyncSession:
-    """Always open a session from the active `AsyncSessionLocal` factory."""
+    """Always open a session bound to the current active event loop."""
+    if IS_VERCEL and not _custom_reconfigured:
+        try:
+            loop = asyncio.get_running_loop()
+            maker = _loop_session_makers.get(loop)
+            if maker is None:
+                loop_engine = build_engine()
+                maker = async_sessionmaker(
+                    bind=loop_engine,
+                    class_=AsyncSession,
+                    expire_on_commit=False,
+                    autoflush=False,
+                )
+                _loop_session_makers[loop] = maker
+            return maker()
+        except RuntimeError:
+            pass
     return AsyncSessionLocal()
 
 
@@ -113,16 +142,21 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 async def init_db() -> None:
     """Ensure schema exists when starting up in standalone or test environments."""
+    global _schema_verified
+    if _schema_verified:
+        return
     import app.models.entities  # noqa: F401
 
     if engine.dialect.name == "postgresql":
-        async with engine.connect() as conn:
-            exists = await conn.scalar(text("SELECT to_regclass('public.users')"))
+        async with open_session() as s:
+            exists = (await s.execute(text("SELECT to_regclass('public.users')"))).scalar()
             if exists is not None:
+                _schema_verified = True
                 return
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    _schema_verified = True
 
 
 async def check_database_health() -> Dict[str, Any]:
@@ -130,7 +164,7 @@ async def check_database_health() -> Dict[str, Any]:
     started = time.perf_counter()
     dialect_name = engine.dialect.name
     try:
-        async with AsyncSessionLocal() as session:
+        async with open_session() as session:
             await session.execute(text("SELECT 1"))
         latency_ms = round((time.perf_counter() - started) * 1000.0, 2)
         return {

@@ -213,7 +213,6 @@ async def login_user(
         user.password_hash = hash_password(payload.password)
     await db.commit()
 
-    await ensure_user_workspace_initialized(db, user)
     _attach_serverless_recovery_seal(response, user)
 
     token, _, ttl = create_access_token(
