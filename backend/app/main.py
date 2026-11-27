@@ -17,7 +17,7 @@ from app.api import analytics, auth, chat, monitoring, providers_models
 from app.config import ROOT_DIR, get_settings
 from app.core.errors import SecurityAndRequestMiddleware, register_exception_handlers
 from app.core.security import configure_secure_logging, redact_secrets
-from app.database import init_db
+from app.database import ServerlessRequestDBScopeMiddleware, init_db
 from app.redis_client import redis_manager
 from app.services.monitoring import background_monitoring_loop
 
@@ -106,6 +106,8 @@ def create_app() -> FastAPI:
         allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
         expose_headers=["X-Request-ID", "Retry-After", "X-RateLimit-Remaining"],
     )
+    # Outermost ASGI wrapper: reuses 1 DB connection for the full request/SSE lifecycle, then disposes cleanly
+    app.add_middleware(ServerlessRequestDBScopeMiddleware)
 
     register_exception_handlers(app)
 
