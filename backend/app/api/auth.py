@@ -22,6 +22,7 @@ from app.core.errors import AppError
 from app.core.security import (
     create_access_token,
     hash_password,
+    needs_password_rehash,
     seal_account_cookie,
     unseal_account_cookie,
     verify_password,
@@ -125,10 +126,9 @@ async def register_user(
         last_login_at=now,
     )
     db.add(user)
-    await db.commit()
-    await db.refresh(user)
+    await db.flush()
 
-    await ensure_user_workspace_initialized(db, user)
+    await ensure_user_workspace_initialized(db, user, force_sync=True)
     _attach_serverless_recovery_seal(response, user)
 
     token, _, ttl = create_access_token(
@@ -209,8 +209,9 @@ async def login_user(
         )
 
     user.last_login_at = datetime.now(timezone.utc)
+    if needs_password_rehash(user.password_hash):
+        user.password_hash = hash_password(payload.password)
     await db.commit()
-    await db.refresh(user)
 
     await ensure_user_workspace_initialized(db, user)
     _attach_serverless_recovery_seal(response, user)

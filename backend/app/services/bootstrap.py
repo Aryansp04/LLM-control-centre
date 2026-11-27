@@ -16,6 +16,7 @@ from app.models.entities import LLMModel, Provider, User, UserSettings
 from app.providers.registry import provider_registry
 
 _loop_locks: Dict[int, asyncio.Lock] = {}
+_initialized_users: set[str] = set()
 
 
 def get_loop_bootstrap_lock() -> asyncio.Lock:
@@ -49,14 +50,35 @@ def resolve_provider_api_key(provider: Provider) -> Tuple[Optional[str], str]:
     return None, "none"
 
 
-async def ensure_user_workspace_initialized(db: AsyncSession, user: User) -> None:
-    """Idempotently seed UserSettings, Providers, and default LLMModels for `user`."""
+async def ensure_user_workspace_initialized(
+    db: AsyncSession, user: User, *, force_sync: bool = False
+) -> None:
+    """Idempotently seed UserSettings, Providers, and default LLMModels for `user` with O(1) cache."""
+    cache_key = f"{id(db.bind)}:{user.id}"
+    if not force_sync and cache_key in _initialized_users:
+        return
+
     async with get_loop_bootstrap_lock():
+        if not force_sync and cache_key in _initialized_users:
+            return
+        if not force_sync:
+            # Fast single-column check to avoid 4 full SELECTs + COMMIT on already-seeded workspaces
+            existing_prov_id = (
+                await db.execute(
+                    select(Provider.id).where(Provider.user_id == user.id).limit(1)
+                )
+            ).scalar_one_or_none()
+            if existing_prov_id is not None:
+                _initialized_users.add(cache_key)
+                return
+
         try:
             await _seed_user_workspace(db, user)
             await db.commit()
+            _initialized_users.add(cache_key)
         except IntegrityError:
             await db.rollback()
+            _initialized_users.add(cache_key)
 
 
 async def _seed_user_workspace(db: AsyncSession, user: User) -> None:

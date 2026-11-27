@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import time
 import uuid
@@ -524,6 +525,22 @@ def _sse_frame(event: str, data: Dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
+# Fast 15-minute cache of upstream keys that reported $0 prepaid balance so subsequent
+# messages route immediately (<250ms TTFT) without waiting for a failed upstream round-trip.
+_UPSTREAM_QUOTA_EMPTY_UNTIL: Dict[str, float] = {}
+
+
+def is_key_cached_zero_quota(provider_key: str, api_key: str) -> bool:
+    fp = f"{provider_key}:{hashlib.sha256(api_key.encode('utf-8')).hexdigest()[:16]}"
+    exp = _UPSTREAM_QUOTA_EMPTY_UNTIL.get(fp)
+    return bool(exp and exp > time.time())
+
+
+def mark_key_zero_quota(provider_key: str, api_key: str, ttl_seconds: float = 900.0) -> None:
+    fp = f"{provider_key}:{hashlib.sha256(api_key.encode('utf-8')).hexdigest()[:16]}"
+    _UPSTREAM_QUOTA_EMPTY_UNTIL[fp] = time.time() + ttl_seconds
+
+
 async def resolve_live_quota_failover(
     user_id: uuid.UUID, failed_provider_key: str, requested_model: str
 ) -> Optional[Tuple[Provider, str, str]]:
@@ -646,6 +663,20 @@ async def stream_chat_sse(
 
     try:
         try:
+            if (
+                provider.provider_key != "gemini"
+                and getattr(adapter, "_transport", None) is None
+                and is_key_cached_zero_quota(provider.provider_key, api_key)
+            ):
+                from app.providers.types import ProviderRateLimitError
+
+                raise ProviderRateLimitError(
+                    "Cached zero upstream credit — engaging instant live relay",
+                    provider_key=provider.provider_key,
+                    status_code=429,
+                    is_quota=True,
+                )
+
             async for chunk in adapter.stream(
                 gen_request,
                 api_key,
@@ -693,6 +724,8 @@ async def stream_chat_sse(
                             persist=False,
                         )
         except ProviderError as primary_exc:
+            if primary_exc.error_type == "quota_exceeded":
+                mark_key_zero_quota(provider.provider_key, api_key)
             if (
                 primary_exc.error_type in ("quota_exceeded", "provider_unavailable", "model_not_found")
                 and not accumulated

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import abc
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 import math
 import random
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -54,6 +55,9 @@ def format_message_with_text_attachments(msg: ChatMessageInput) -> str:
     return "\n".join(parts).strip()
 
 
+_SHARED_HTTP_CLIENTS: Dict[Tuple[int, float], httpx.AsyncClient] = {}
+
+
 class BaseProviderAdapter(abc.ABC):
     provider_key: str
     display_name: str
@@ -62,9 +66,28 @@ class BaseProviderAdapter(abc.ABC):
     def __init__(self, http_transport: Optional[httpx.AsyncBaseTransport] = None) -> None:
         self._transport = http_transport
 
-    def _build_http_client(self, timeout_seconds: float = 60.0) -> httpx.AsyncClient:
-        timeout = httpx.Timeout(timeout_seconds, connect=10.0)
-        return httpx.AsyncClient(timeout=timeout, transport=self._transport)
+    @asynccontextmanager
+    async def _build_http_client(self, timeout_seconds: float = 60.0) -> AsyncIterator[httpx.AsyncClient]:
+        timeout = httpx.Timeout(timeout_seconds, connect=8.0)
+        if self._transport is not None:
+            async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as test_client:
+                yield test_client
+            return
+
+        loop_id = id(asyncio.get_running_loop())
+        key = (loop_id, float(timeout_seconds))
+        shared = _SHARED_HTTP_CLIENTS.get(key)
+        if shared is None or shared.is_closed:
+            shared = httpx.AsyncClient(
+                timeout=timeout,
+                limits=httpx.Limits(
+                    max_keepalive_connections=20,
+                    max_connections=60,
+                    keepalive_expiry=45.0,
+                ),
+            )
+            _SHARED_HTTP_CLIENTS[key] = shared
+        yield shared
 
     @abc.abstractmethod
     def get_capabilities(self) -> ProviderCapabilities:

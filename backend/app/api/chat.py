@@ -29,6 +29,8 @@ from app.schemas.api_schemas import (
 )
 from app.services.attachments import validate_and_process_attachment
 from app.services.chat_service import (
+    is_key_cached_zero_quota,
+    mark_key_zero_quota,
     prepare_chat_execution,
     record_Telemetry_and_finalize,
     resolve_live_quota_failover,
@@ -139,6 +141,20 @@ async def create_chat_completion(
     adapter = provider_registry.get(prov.provider_key)
     try:
         try:
+            if (
+                prov.provider_key != "gemini"
+                and getattr(adapter, "_transport", None) is None
+                and is_key_cached_zero_quota(prov.provider_key, api_key)
+            ):
+                from app.providers.types import ProviderRateLimitError
+
+                raise ProviderRateLimitError(
+                    "Cached zero upstream credit — engaging instant live relay",
+                    provider_key=prov.provider_key,
+                    status_code=429,
+                    is_quota=True,
+                )
+
             result = await adapter.complete(
                 gen_req,
                 api_key,
@@ -146,6 +162,8 @@ async def create_chat_completion(
                 organization_id=prov.organization_id,
             )
         except ProviderError as primary_exc:
+            if primary_exc.error_type == "quota_exceeded":
+                mark_key_zero_quota(prov.provider_key, api_key)
             if (
                 primary_exc.error_type in ("quota_exceeded", "provider_unavailable", "model_not_found")
                 and getattr(adapter, "_transport", None) is None

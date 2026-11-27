@@ -83,19 +83,18 @@ class Settings(BaseSettings):
         elif val.startswith("postgresql://") and "+asyncpg" not in val:
             val = "postgresql+asyncpg://" + val[len("postgresql://") :]
 
-        # Convert libpq sslmode/channel_binding query params to asyncpg-compatible params
+        # Strip libpq-only query params so asyncpg connects cleanly to Neon / Vercel Postgres
         if val.startswith("postgresql+asyncpg://") and "?" in val:
             parts = urlsplit(val)
             raw_params = parse_qsl(parts.query, keep_blank_values=True)
             cleaned_params = []
             for k, v in raw_params:
-                if k == "sslmode":
-                    if v != "disable":
-                        cleaned_params.append(("ssl", "require"))
-                elif k == "channel_binding":
+                kl = k.lower()
+                if kl in ("sslmode", "channel_binding", "pgbouncer", "connect_timeout", "options"):
+                    if kl == "sslmode" and v == "disable":
+                        cleaned_params.append(("ssl", "disable"))
                     continue
-                else:
-                    cleaned_params.append((k, v))
+                cleaned_params.append((k, v))
             val = urlunsplit(
                 (parts.scheme, parts.netloc, parts.path, urlencode(cleaned_params), parts.fragment)
             )
@@ -106,11 +105,13 @@ class Settings(BaseSettings):
         if IS_VERCEL:
             # Support Vercel Postgres / Neon `POSTGRES_URL` automatically
             pg_env = (
-                os.getenv("POSTGRES_URL")
-                or os.getenv("POSTGRES_PRISMA_URL")
+                os.getenv("DATABASE_URL_UNPOOLED")
                 or os.getenv("POSTGRES_URL_NON_POOLING")
+                or os.getenv("DATABASE_URL")
+                or os.getenv("POSTGRES_URL")
+                or os.getenv("POSTGRES_PRISMA_URL")
             )
-            if pg_env and not os.getenv("DATABASE_URL"):
+            if pg_env and "localhost" not in pg_env and "127.0.0.1" not in pg_env:
                 self.database_url = self.normalize_database_url(pg_env)
             elif not os.getenv("DATABASE_URL") or "localhost" in self.database_url or "127.0.0.1" in self.database_url:
                 tmp_db = (Path(tempfile.gettempdir()) / "llm_control_center.db").resolve().as_posix()

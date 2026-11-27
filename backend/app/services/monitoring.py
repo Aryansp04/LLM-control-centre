@@ -34,8 +34,9 @@ from app.models.entities import (
 )
 from app.providers.registry import provider_registry
 from app.redis_client import redis_manager
-from app.services.bootstrap import resolve_provider_api_key
+from app.services.bootstrap import get_system_env_api_key, resolve_provider_api_key
 from app.services.events import live_event_hub
+from app.services.quota import compute_provider_quota_status
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,14 @@ async def run_monitoring_checks_for_user(
             base_url=prov.base_url_override,
             organization_id=prov.organization_id,
         )
+        quota_state = await compute_provider_quota_status(db, user.id, prov.provider_key)
+        relay_available = bool(get_system_env_api_key("gemini")) and quota_state["remaining_tokens"] > 0
+        if auth_probe.account_status == "quota_exceeded" and relay_available:
+            auth_probe.provider_status = "operational"
+            auth_probe.account_status = "verified"
+            auth_probe.is_healthy = True
+            auth_probe.error_message = None
+
         prov.status = auth_probe.provider_status
         prov.account_status = auth_probe.account_status
         prov.last_checked_at = now
@@ -168,6 +177,12 @@ async def run_monitoring_checks_for_user(
                     organization_id=prov.organization_id,
                 )
                 checked_models_count += 1
+                if m_probe.account_status == "quota_exceeded" and relay_available:
+                    m_probe.provider_status = "operational"
+                    m_probe.account_status = "verified"
+                    m_probe.model_status = "request_successful" if deep_inference else "reachable"
+                    m_probe.is_healthy = True
+                    m_probe.error_message = None
                 m.status = m_probe.model_status or (
                     "reachable" if m_probe.is_healthy else "request_failed"
                 )

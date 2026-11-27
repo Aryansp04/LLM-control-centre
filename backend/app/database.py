@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ssl
 import time
 from typing import Any, AsyncGenerator, Dict
 
@@ -47,15 +48,30 @@ def build_engine(database_url: str | None = None) -> AsyncEngine:
 
         return engine
 
+    is_local_pg = "@localhost" in url or "@127.0.0.1" in url or "ssl=disable" in url
+    pg_connect_args: Dict[str, Any] = {
+        "statement_cache_size": 0,
+        "timeout": 15,
+        "command_timeout": 30,
+    }
+    if not is_local_pg:
+        pg_connect_args["ssl"] = ssl.create_default_context()
+
     if IS_VERCEL:
-        # Use NullPool on serverless functions to avoid cross-event-loop asyncpg pool errors
-        return create_async_engine(url, poolclass=NullPool, future=True)
+        # Use NullPool + statement_cache_size=0 for Neon PgBouncer & serverless event loops
+        return create_async_engine(
+            url,
+            poolclass=NullPool,
+            connect_args=pg_connect_args,
+            future=True,
+        )
 
     return create_async_engine(
         url,
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
         pool_pre_ping=True,
+        connect_args=pg_connect_args,
         future=True,
     )
 
@@ -98,6 +114,12 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 async def init_db() -> None:
     """Ensure schema exists when starting up in standalone or test environments."""
     import app.models.entities  # noqa: F401
+
+    if engine.dialect.name == "postgresql":
+        async with engine.connect() as conn:
+            exists = await conn.scalar(text("SELECT to_regclass('public.users')"))
+            if exists is not None:
+                return
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

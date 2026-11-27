@@ -71,11 +71,15 @@ def configure_secure_logging(level: str = "INFO") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Password Hashing (bcrypt)
+# Password Hashing (bcrypt — cost 10 for fast <80ms serverless auth)
 # ---------------------------------------------------------------------------
 def hash_password(plain_password: str) -> str:
-    salt = bcrypt.gensalt(rounds=12)
+    salt = bcrypt.gensalt(rounds=10)
     return bcrypt.hashpw(plain_password.encode("utf-8"), salt).decode("utf-8")
+
+
+def needs_password_rehash(password_hash: str) -> bool:
+    return password_hash.startswith(("$2b$12$", "$2a$12$"))
 
 
 def verify_password(plain_password: str, password_hash: str) -> bool:
