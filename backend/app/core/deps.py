@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import uuid
 from typing import Tuple
 
@@ -9,14 +10,19 @@ import jwt
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
+from app.config import IS_VERCEL, get_settings
 from app.core.errors import AppError
-from app.core.security import decode_access_token
-from app.database import get_db
+from app.core.security import decode_access_token, hash_password
+from app.database import engine, get_db
 from app.models.entities import User
 from app.redis_client import redis_manager
+from app.services.bootstrap import (
+    ensure_user_workspace_initialized,
+    get_loop_bootstrap_lock,
+)
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -77,6 +83,39 @@ async def get_current_user_and_token(
             message="Database is temporarily unavailable.",
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         ) from exc
+
+    if user is None and IS_VERCEL and engine.dialect.name == "sqlite":
+        # Ephemeral `/tmp` SQLite on cold Lambda container: rehydrate verified JWT principal safely
+        async with get_loop_bootstrap_lock():
+            res_check = await db.execute(select(User).where(User.id == user_uuid))
+            user = res_check.scalar_one_or_none()
+            email_claim = str(payload.get("email") or "").lower().strip()
+            if user is None and email_claim:
+                base_username = str(payload.get("username") or email_claim.split("@")[0]).strip()
+                rehydrated = User(
+                    id=user_uuid,
+                    email=email_claim,
+                    username=f"{base_username[:42]}_{str(user_uuid)[:6]}" if len(base_username) < 3 else base_username[:50],
+                    password_hash=hash_password(uuid.uuid4().hex),
+                    full_name=payload.get("full_name"),
+                    role=str(payload.get("role") or "admin"),
+                    is_active=True,
+                    last_login_at=datetime.now(timezone.utc),
+                )
+                try:
+                    db.add(rehydrated)
+                    await db.commit()
+                    await db.refresh(rehydrated)
+                    user = rehydrated
+                except IntegrityError:
+                    await db.rollback()
+                    res_retry = await db.execute(select(User).where(User.id == user_uuid))
+                    user = res_retry.scalar_one_or_none()
+                    if user is None:
+                        res_email = await db.execute(select(User).where(User.email == email_claim))
+                        user = res_email.scalar_one_or_none()
+        if user is not None:
+            await ensure_user_workspace_initialized(db, user)
 
     if user is None or not user.is_active:
         raise AppError(

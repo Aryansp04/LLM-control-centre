@@ -2,16 +2,29 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.security import decrypt_api_key, mask_api_key
 from app.models.entities import LLMModel, Provider, User, UserSettings
 from app.providers.registry import provider_registry
+
+_loop_locks: Dict[int, asyncio.Lock] = {}
+
+
+def get_loop_bootstrap_lock() -> asyncio.Lock:
+    loop_id = id(asyncio.get_running_loop())
+    lock = _loop_locks.get(loop_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _loop_locks[loop_id] = lock
+    return lock
 
 
 def get_system_env_api_key(provider_key: str) -> Optional[str]:
@@ -38,6 +51,15 @@ def resolve_provider_api_key(provider: Provider) -> Tuple[Optional[str], str]:
 
 async def ensure_user_workspace_initialized(db: AsyncSession, user: User) -> None:
     """Idempotently seed UserSettings, Providers, and default LLMModels for `user`."""
+    async with get_loop_bootstrap_lock():
+        try:
+            await _seed_user_workspace(db, user)
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+
+
+async def _seed_user_workspace(db: AsyncSession, user: User) -> None:
     # 1. Settings
     default_prov = "gemini" if get_system_env_api_key("gemini") else "openai"
     default_mod = (
@@ -138,5 +160,3 @@ async def ensure_user_workspace_initialized(db: AsyncSession, user: User) -> Non
                         is_available=True,
                     )
                 )
-
-    await db.commit()

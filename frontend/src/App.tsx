@@ -6,6 +6,7 @@ import {
   Routes,
   useLocation,
   useNavigate,
+  useSearchParams,
 } from "react-router-dom";
 import { Loader2 } from "lucide-react";
 import { AppProvider, useApp } from "./context/AppContext";
@@ -24,9 +25,11 @@ import { SettingsPage } from "./pages/SettingsPage";
 const AppRoutes: React.FC = () => {
   const { user, authLoading } = useApp();
   const [showAuthPortal, setShowAuthPortal] = useState(false);
+  const [authMode, setAuthMode] = useState<"login" | "register">("register");
   const [pendingPath, setPendingPath] = useState<string>("/overview");
   const location = useLocation();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   if (authLoading) {
     return (
@@ -37,24 +40,48 @@ const AppRoutes: React.FC = () => {
     );
   }
 
+  // Dedicated `/auth` route
+  if (location.pathname === "/auth") {
+    if (user) {
+      return <Navigate to={pendingPath || "/overview"} replace />;
+    }
+    const modeParam =
+      searchParams.get("mode") === "register" ? "register" : "login";
+    return (
+      <AuthPage
+        initialMode={modeParam}
+        onBackToStage={() => navigate("/")}
+        onAuthenticated={() =>
+          navigate(pendingPath || "/overview", { replace: true })
+        }
+      />
+    );
+  }
+
   // Root `/` renders the pixel-faithful full-bleed CloudFront video Hero Stage
   if (location.pathname === "/") {
     if (!user && showAuthPortal) {
       return (
         <AuthPage
+          initialMode={authMode}
           onBackToStage={() => setShowAuthPortal(false)}
+          onAuthenticated={() => {
+            setShowAuthPortal(false);
+            navigate(pendingPath || "/overview", { replace: true });
+          }}
         />
       );
     }
     return (
       <LandingPage
         isAuthenticated={Boolean(user)}
-        onEnterConsole={(target = "/overview") => {
+        onEnterConsole={(target = "/overview", preferredMode = "register") => {
           const dest = target === "/" ? "/overview" : target;
           if (user) {
             navigate(dest);
           } else {
             setPendingPath(dest);
+            setAuthMode(preferredMode);
             setShowAuthPortal(true);
           }
         }}
@@ -65,7 +92,16 @@ const AppRoutes: React.FC = () => {
   if (!user) {
     return (
       <AuthPage
+        initialMode="login"
         onBackToStage={() => navigate("/")}
+        onAuthenticated={() =>
+          navigate(
+            location.pathname && location.pathname !== "/"
+              ? location.pathname
+              : "/overview",
+            { replace: true }
+          )
+        }
       />
     );
   }

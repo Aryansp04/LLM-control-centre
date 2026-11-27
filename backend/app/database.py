@@ -27,9 +27,10 @@ def build_engine(database_url: str | None = None) -> AsyncEngine:
     url = database_url or settings.database_url
 
     if url.startswith("sqlite"):
-        connect_args: Dict[str, Any] = {"check_same_thread": False}
+        connect_args: Dict[str, Any] = {"check_same_thread": False, "timeout": 15}
         kwargs: Dict[str, Any] = {"connect_args": connect_args}
-        if ":memory:" in url:
+        is_memory = ":memory:" in url
+        if is_memory:
             kwargs["poolclass"] = StaticPool
         elif IS_VERCEL:
             kwargs["poolclass"] = NullPool
@@ -39,6 +40,9 @@ def build_engine(database_url: str | None = None) -> AsyncEngine:
         def _set_sqlite_pragma(dbapi_connection: Any, _connection_record: Any) -> None:
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA busy_timeout=15000")
+            if not is_memory:
+                cursor.execute("PRAGMA journal_mode=WAL")
             cursor.close()
 
         return engine

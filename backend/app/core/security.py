@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
 import re
 import uuid
@@ -90,7 +91,12 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
 # JWT Access Tokens
 # ---------------------------------------------------------------------------
 def create_access_token(
-    user_id: str, email: str, expires_minutes: Optional[int] = None
+    user_id: str,
+    email: str,
+    expires_minutes: Optional[int] = None,
+    username: Optional[str] = None,
+    full_name: Optional[str] = None,
+    role: str = "admin",
 ) -> tuple[str, str, int]:
     """Returns (encoded_jwt, jti, ttl_seconds)."""
     settings = get_settings()
@@ -101,6 +107,9 @@ def create_access_token(
     payload: Dict[str, Any] = {
         "sub": str(user_id),
         "email": email,
+        "username": username or email.split("@")[0],
+        "full_name": full_name,
+        "role": role,
         "jti": jti,
         "iat": int(now.timestamp()),
         "exp": int(expire.timestamp()),
@@ -147,3 +156,21 @@ def mask_api_key(plain_key: str) -> str:
     if not plain_key or not plain_key.strip():
         return ""
     return "••••••••••••••••"
+
+
+def seal_account_cookie(account_data: Dict[str, Any]) -> str:
+    """Fernet-encrypt minimal user record (with bcrypt hash) for stateless serverless recovery."""
+    raw = json.dumps(account_data, separators=(",", ":")).encode("utf-8")
+    return _get_fernet().encrypt(raw).decode("utf-8")
+
+
+def unseal_account_cookie(sealed: str) -> Optional[Dict[str, Any]]:
+    """Decrypt and validate a Fernet-sealed serverless account recovery cookie."""
+    if not sealed:
+        return None
+    try:
+        raw = _get_fernet().decrypt(sealed.encode("utf-8")).decode("utf-8")
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None

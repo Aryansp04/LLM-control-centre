@@ -131,20 +131,30 @@ def register_exception_handlers(app: FastAPI) -> None:
     ) -> JSONResponse:
         req_id = getattr(request.state, "request_id", "unknown")
         sanitized_errors = []
+        field_summaries = []
         for err in exc.errors():
+            loc_parts = [str(x) for x in err.get("loc", []) if x != "body"]
+            field_label = ".".join(loc_parts) if loc_parts else "input"
+            msg = err.get("msg", "Invalid value")
             sanitized_errors.append(
                 {
                     "loc": list(err.get("loc", [])),
-                    "msg": err.get("msg", "Invalid value"),
+                    "msg": msg,
                     "type": err.get("type", "validation_error"),
                 }
             )
+            field_summaries.append(f"{field_label}: {msg}")
+        friendly_msg = (
+            "; ".join(field_summaries)
+            if field_summaries
+            else "Request validation failed."
+        )
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content={
                 "error": {
                     "code": "validation_error",
-                    "message": "Request validation failed.",
+                    "message": friendly_msg,
                     "details": {"fields": sanitized_errors},
                     "request_id": req_id,
                 }

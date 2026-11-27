@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -13,9 +14,18 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 # ---------------------------------------------------------------------------
 class RegisterRequest(BaseModel):
     email: EmailStr
-    username: str = Field(min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_.\-]+$")
+    username: str = Field(min_length=3, max_length=50)
     password: str = Field(min_length=8, max_length=128)
     full_name: Optional[str] = Field(default=None, max_length=120)
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def normalize_username(cls, val: Any) -> str:
+        if not isinstance(val, str):
+            return ""
+        cleaned = re.sub(r"\s+", "_", val.strip())
+        cleaned = re.sub(r"[^A-Za-z0-9_.\-]", "", cleaned)
+        return cleaned
 
 
 class LoginRequest(BaseModel):

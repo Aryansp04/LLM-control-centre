@@ -1,15 +1,23 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Lock, ArrowRight, AlertCircle, ArrowLeft } from "lucide-react";
 import { useApp } from "../context/AppContext";
 import { ApiClientError } from "../api/client";
 import { BrandMark } from "../components/BrandMark";
 import { HERO_VIDEO_URL } from "./LandingPage";
 
-export const AuthPage: React.FC<{ onBackToStage?: () => void }> = ({
+export interface AuthPageProps {
+  initialMode?: "login" | "register";
+  onBackToStage?: () => void;
+  onAuthenticated?: () => void;
+}
+
+export const AuthPage: React.FC<AuthPageProps> = ({
+  initialMode = "login",
   onBackToStage,
+  onAuthenticated,
 }) => {
   const { login, register } = useApp();
-  const [mode, setMode] = useState<"login" | "register">("login");
+  const [mode, setMode] = useState<"login" | "register">(initialMode);
   const [email, setEmail] = useState("");
   const [username, setUsername] = useState("");
   const [fullName, setFullName] = useState("");
@@ -17,21 +25,57 @@ export const AuthPage: React.FC<{ onBackToStage?: () => void }> = ({
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  useEffect(() => {
+    setMode(initialMode);
+    setError(null);
+  }, [initialMode]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    setSubmitting(true);
-    try {
-      if (mode === "login") {
-        await login(email.trim(), password);
-      } else {
+
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) {
+      setError("Please enter a valid email address.");
+      return;
+    }
+    if (mode === "register") {
+      const derivedUser = (username.trim() || trimmedEmail.split("@")[0] || "")
+        .replace(/\s+/g, "_")
+        .replace(/[^A-Za-z0-9_.-]/g, "");
+      if (derivedUser.length < 3) {
+        setError("Username must contain at least 3 letters or numbers.");
+        return;
+      }
+      if (password.length < 8) {
+        setError("Password must be at least 8 characters long.");
+        return;
+      }
+      setSubmitting(true);
+      try {
         await register(
-          email.trim(),
-          username.trim(),
+          trimmedEmail,
+          derivedUser,
           password,
           fullName.trim() || undefined
         );
+        onAuthenticated?.();
+      } catch (err) {
+        if (err instanceof ApiClientError) {
+          setError(err.message);
+        } else {
+          setError("Unable to reach backend authentication service.");
+        }
+      } finally {
+        setSubmitting(false);
       }
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await login(trimmedEmail, password);
+      onAuthenticated?.();
     } catch (err) {
       if (err instanceof ApiClientError) {
         setError(err.message);
@@ -94,6 +138,38 @@ export const AuthPage: React.FC<{ onBackToStage?: () => void }> = ({
 
       {/* Centered Monochrome Architectural Auth Panel */}
       <div className="relative z-10 my-auto mx-auto w-full max-w-[440px] rounded-3xl border border-white/[0.12] bg-[#080808]/90 backdrop-blur-xl p-8 sm:p-9">
+        {/* Explicit Sign In / Create Account Mode Switcher */}
+        <div className="mb-6 grid grid-cols-2 rounded-full border border-white/[0.1] bg-[#050505] p-1">
+          <button
+            type="button"
+            onClick={() => {
+              setMode("login");
+              setError(null);
+            }}
+            className={`h-9 rounded-full text-xs font-medium transition-colors ${
+              mode === "login"
+                ? "bg-[#ffffff] text-[#050505]"
+                : "text-[#a7a6a6] hover:text-[#fafafa]"
+            }`}
+          >
+            Sign In
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setMode("register");
+              setError(null);
+            }}
+            className={`h-9 rounded-full text-xs font-medium transition-colors ${
+              mode === "register"
+                ? "bg-[#ffffff] text-[#050505]"
+                : "text-[#a7a6a6] hover:text-[#fafafa]"
+            }`}
+          >
+            Create Account
+          </button>
+        </div>
+
         <div className="flex items-center justify-between">
           <h1 className="text-xl font-medium tracking-tight text-[#fafafa]">
             {mode === "login" ? "Sign in to workspace" : "Create operator account"}
@@ -116,7 +192,7 @@ export const AuthPage: React.FC<{ onBackToStage?: () => void }> = ({
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+        <form onSubmit={handleSubmit} noValidate className="mt-6 space-y-4">
           <div>
             <label
               htmlFor="auth-email"
@@ -151,7 +227,6 @@ export const AuthPage: React.FC<{ onBackToStage?: () => void }> = ({
                   required
                   minLength={3}
                   maxLength={50}
-                  pattern="^[A-Za-z0-9_.\-]+$"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   placeholder="alex_ops"
@@ -208,7 +283,7 @@ export const AuthPage: React.FC<{ onBackToStage?: () => void }> = ({
                 ? "Authenticating..."
                 : mode === "login"
                 ? "Sign in"
-                : "Get Started"}
+                : "Create account"}
             </span>
             <ArrowRight className="h-4 w-4" />
           </button>

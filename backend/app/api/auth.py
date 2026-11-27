@@ -3,21 +3,30 @@
 from __future__ import annotations
 
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Tuple
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import IS_VERCEL, get_settings
 from app.core.deps import (
     enforce_auth_rate_limit,
     get_current_user,
     get_current_user_and_token,
 )
 from app.core.errors import AppError
-from app.core.security import create_access_token, hash_password, verify_password
-from app.database import get_db
+from app.core.security import (
+    create_access_token,
+    hash_password,
+    seal_account_cookie,
+    unseal_account_cookie,
+    verify_password,
+)
+from app.database import engine, get_db
 from app.models.entities import User
 from app.redis_client import redis_manager
 from app.schemas.api_schemas import (
@@ -29,6 +38,8 @@ from app.schemas.api_schemas import (
 from app.services.bootstrap import ensure_user_workspace_initialized
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
+
+ACCOUNT_SEAL_COOKIE = "llmcc_acct_seal"
 
 
 def _serialize_user(u: User) -> UserResponse:
@@ -44,6 +55,30 @@ def _serialize_user(u: User) -> UserResponse:
     )
 
 
+def _attach_serverless_recovery_seal(response: Response, user: User) -> None:
+    """Set encrypted HttpOnly account recovery cookie so Sign In survives ephemeral serverless restarts."""
+    settings = get_settings()
+    sealed = seal_account_cookie(
+        {
+            "id": str(user.id),
+            "email": user.email,
+            "username": user.username,
+            "full_name": user.full_name,
+            "role": user.role,
+            "password_hash": user.password_hash,
+        }
+    )
+    response.set_cookie(
+        key=ACCOUNT_SEAL_COOKIE,
+        value=sealed,
+        max_age=30 * 24 * 3600,
+        httponly=True,
+        secure=IS_VERCEL or settings.is_production,
+        samesite="lax",
+        path="/",
+    )
+
+
 @router.post(
     "/register",
     response_model=AuthTokenResponse,
@@ -52,6 +87,7 @@ def _serialize_user(u: User) -> UserResponse:
 )
 async def register_user(
     payload: RegisterRequest,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> AuthTokenResponse:
     email_norm = payload.email.lower().strip()
@@ -69,7 +105,7 @@ async def register_user(
         if existing.email == email_norm:
             raise AppError(
                 "email_already_registered",
-                "An account with this email already exists.",
+                "An account with this email already exists. Please sign in instead.",
                 status_code=status.HTTP_409_CONFLICT,
             )
         raise AppError(
@@ -93,8 +129,15 @@ async def register_user(
     await db.refresh(user)
 
     await ensure_user_workspace_initialized(db, user)
+    _attach_serverless_recovery_seal(response, user)
 
-    token, _, ttl = create_access_token(str(user.id), user.email)
+    token, _, ttl = create_access_token(
+        str(user.id),
+        user.email,
+        username=user.username,
+        full_name=user.full_name,
+        role=user.role,
+    )
     return AuthTokenResponse(
         access_token=token,
         expires_in=ttl,
@@ -109,6 +152,8 @@ async def register_user(
 )
 async def login_user(
     payload: LoginRequest,
+    request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> AuthTokenResponse:
     email_norm = payload.email.lower().strip()
@@ -116,10 +161,44 @@ async def login_user(
         await db.execute(select(User).where(User.email == email_norm))
     ).scalar_one_or_none()
 
+    # In ephemeral serverless SQLite mode, recover previously registered operator from Fernet HttpOnly seal
+    if user is None and IS_VERCEL and engine.dialect.name == "sqlite":
+        sealed_cookie = request.cookies.get(ACCOUNT_SEAL_COOKIE, "")
+        sealed_data = unseal_account_cookie(sealed_cookie)
+        if (
+            sealed_data
+            and str(sealed_data.get("email") or "").lower().strip() == email_norm
+            and verify_password(payload.password, str(sealed_data.get("password_hash") or ""))
+        ):
+            try:
+                recovered_id = uuid.UUID(str(sealed_data.get("id")))
+            except Exception:
+                recovered_id = uuid.uuid4()
+            recovered_user = User(
+                id=recovered_id,
+                email=email_norm,
+                username=str(sealed_data.get("username") or email_norm.split("@")[0])[:50],
+                password_hash=str(sealed_data["password_hash"]),
+                full_name=sealed_data.get("full_name"),
+                role=str(sealed_data.get("role") or "admin"),
+                is_active=True,
+                last_login_at=datetime.now(timezone.utc),
+            )
+            try:
+                db.add(recovered_user)
+                await db.commit()
+                await db.refresh(recovered_user)
+                user = recovered_user
+            except IntegrityError:
+                await db.rollback()
+                user = (
+                    await db.execute(select(User).where(User.email == email_norm))
+                ).scalar_one_or_none()
+
     if user is None or not verify_password(payload.password, user.password_hash):
         raise AppError(
             "invalid_credentials",
-            "Invalid email or password.",
+            "Invalid email or password. If you haven't created an account yet, switch to Create Account.",
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
     if not user.is_active:
@@ -134,8 +213,15 @@ async def login_user(
     await db.refresh(user)
 
     await ensure_user_workspace_initialized(db, user)
+    _attach_serverless_recovery_seal(response, user)
 
-    token, _, ttl = create_access_token(str(user.id), user.email)
+    token, _, ttl = create_access_token(
+        str(user.id),
+        user.email,
+        username=user.username,
+        full_name=user.full_name,
+        role=user.role,
+    )
     return AuthTokenResponse(
         access_token=token,
         expires_in=ttl,

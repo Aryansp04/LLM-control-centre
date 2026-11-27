@@ -12,7 +12,7 @@ export const HERO_VIDEO_URL =
 
 interface LandingPageProps {
   isAuthenticated: boolean;
-  onEnterConsole: (targetPath?: string) => void;
+  onEnterConsole: (targetPath?: string, preferredMode?: "login" | "register") => void;
 }
 
 export const LandingPage: React.FC<LandingPageProps> = ({
@@ -42,9 +42,12 @@ export const LandingPage: React.FC<LandingPageProps> = ({
     };
   }, []);
 
-  const handleNavAction = (path: string) => {
+  const handleNavAction = (
+    path: string,
+    preferredMode: "login" | "register" = "login"
+  ) => {
     setMenuOpen(false);
-    onEnterConsole(path);
+    onEnterConsole(path, preferredMode);
   };
 
   return (
@@ -120,7 +123,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         <button
           type="button"
           className="pill pill-nav"
-          onClick={() => handleNavAction(isAuthenticated ? "/chat" : "/")}
+          onClick={() =>
+            handleNavAction(isAuthenticated ? "/chat" : "/overview", "register")
+          }
         >
           <span>{isAuthenticated ? "Open Console" : "Get Started"}</span>
         </button>
@@ -185,7 +190,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             <button
               type="button"
               className="pill"
-              onClick={() => handleNavAction(isAuthenticated ? "/chat" : "/")}
+              onClick={() =>
+                handleNavAction(isAuthenticated ? "/chat" : "/overview", "register")
+              }
             >
               <span>{isAuthenticated ? "Open Console" : "Get Started"}</span>
             </button>
@@ -219,7 +226,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           <button
             type="button"
             className="pill pill-cta"
-            onClick={() => handleNavAction(isAuthenticated ? "/chat" : "/")}
+            onClick={() =>
+              handleNavAction(isAuthenticated ? "/chat" : "/overview", "register")
+            }
           >
             <span>{isAuthenticated ? "Open Console" : "Get Started"}</span>
           </button>

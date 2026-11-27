@@ -18,14 +18,14 @@ describe("LLM Control Center UI & Streaming Tests", () => {
     fireEvent.click(getStartedBtns[0]);
 
     expect(
-      await screen.findByText(/Sign in to workspace/i)
-    ).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /Create an account/i }));
-    expect(
       await screen.findByText(/Create operator account/i)
     ).toBeInTheDocument();
     expect(screen.getByLabelText(/Username/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Sign In$/i }));
+    expect(
+      await screen.findByText(/Sign in to workspace/i)
+    ).toBeInTheDocument();
   });
 
   it("renders distinct status badges for operational, invalid_credentials, and rate_limited", () => {
