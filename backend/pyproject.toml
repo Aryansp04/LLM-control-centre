@@ -1,0 +1,15 @@
+[project]
+name = "llm-control-center-backend"
+version = "1.0.0"
+description = "Production-Ready Multi-Provider AI Chat and Real-Time Monitoring Platform"
+readme = "../README.md"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "live_provider: integration tests that invoke real upstream LLM provider APIs when credentials are set",
+]
