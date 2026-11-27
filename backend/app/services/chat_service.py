@@ -530,13 +530,19 @@ def _sse_frame(event: str, data: Dict[str, Any]) -> str:
 _UPSTREAM_QUOTA_EMPTY_UNTIL: Dict[str, float] = {}
 
 
-def is_key_cached_zero_quota(provider_key: str, api_key: str) -> bool:
+def is_key_cached_zero_quota(
+    provider_key: str, api_key: str, prov_caps: Optional[Dict[str, Any]] = None
+) -> bool:
+    if isinstance(prov_caps, dict):
+        db_until = float(prov_caps.get("_relay_until") or 0)
+        if db_until > time.time():
+            return True
     fp = f"{provider_key}:{hashlib.sha256(api_key.encode('utf-8')).hexdigest()[:16]}"
     exp = _UPSTREAM_QUOTA_EMPTY_UNTIL.get(fp)
     return bool(exp and exp > time.time())
 
 
-def mark_key_zero_quota(provider_key: str, api_key: str, ttl_seconds: float = 900.0) -> None:
+def mark_key_zero_quota(provider_key: str, api_key: str, ttl_seconds: float = 1800.0) -> None:
     fp = f"{provider_key}:{hashlib.sha256(api_key.encode('utf-8')).hexdigest()[:16]}"
     _UPSTREAM_QUOTA_EMPTY_UNTIL[fp] = time.time() + ttl_seconds
 
@@ -666,7 +672,9 @@ async def stream_chat_sse(
             if (
                 provider.provider_key != "gemini"
                 and getattr(adapter, "_transport", None) is None
-                and is_key_cached_zero_quota(provider.provider_key, api_key)
+                and is_key_cached_zero_quota(
+                    provider.provider_key, api_key, provider.capabilities_json
+                )
             ):
                 from app.providers.types import ProviderRateLimitError
 
@@ -726,6 +734,13 @@ async def stream_chat_sse(
         except ProviderError as primary_exc:
             if primary_exc.error_type == "quota_exceeded":
                 mark_key_zero_quota(provider.provider_key, api_key)
+                async with open_session() as flag_db:
+                    p_flag = await flag_db.get(Provider, provider.id)
+                    if p_flag is not None:
+                        caps = dict(p_flag.capabilities_json or {})
+                        caps["_relay_until"] = time.time() + 1800.0
+                        p_flag.capabilities_json = caps
+                        await flag_db.commit()
             if (
                 primary_exc.error_type in ("quota_exceeded", "provider_unavailable", "model_not_found")
                 and not accumulated

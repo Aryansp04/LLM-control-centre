@@ -1,8 +1,7 @@
-"""Async SQLAlchemy 2.0 database engine, request-scoped serverless pooling, and health probe."""
+"""Async SQLAlchemy 2.0 database engine, session factory, and health probe."""
 
 from __future__ import annotations
 
-import contextvars
 import ssl
 import time
 from typing import Any, AsyncGenerator, Dict, Optional
@@ -34,9 +33,7 @@ def _get_ssl_context() -> ssl.SSLContext:
     return _SSL_CTX
 
 
-def build_engine(
-    database_url: str | None = None, *, request_scoped_pool: bool = False
-) -> AsyncEngine:
+def build_engine(database_url: str | None = None) -> AsyncEngine:
     settings = get_settings()
     url = database_url or settings.database_url
 
@@ -46,7 +43,7 @@ def build_engine(
         is_memory = ":memory:" in url
         if is_memory:
             kwargs["poolclass"] = StaticPool
-        elif IS_VERCEL and not request_scoped_pool:
+        elif IS_VERCEL:
             kwargs["poolclass"] = NullPool
         engine_inst = create_async_engine(url, future=True, **kwargs)
 
@@ -70,18 +67,8 @@ def build_engine(
     if not is_local_pg:
         pg_connect_args["ssl"] = _get_ssl_context()
 
-    if request_scoped_pool:
-        # Reuses 1 warm TLS connection across all queries inside a single HTTP/SSE request,
-        # then cleanly disposes at request end so AWS Lambda never freezes open sockets.
-        return create_async_engine(
-            url,
-            pool_size=1,
-            max_overflow=2,
-            connect_args=pg_connect_args,
-            future=True,
-        )
-
     if IS_VERCEL:
+        # NullPool avoids cross-event-loop and frozen-Lambda socket hangs (~45ms inside iad1)
         return create_async_engine(
             url,
             poolclass=NullPool,
@@ -106,43 +93,12 @@ AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
     expire_on_commit=False,
     autoflush=False,
 )
-
-_custom_reconfigured: bool = False
 _schema_verified: bool = False
-_request_scope_var: contextvars.ContextVar[Optional[Dict[str, Any]]] = (
-    contextvars.ContextVar("llmcc_request_scope", default=None)
-)
-
-
-class ServerlessRequestDBScopeMiddleware:
-    """Pure ASGI middleware providing a 1-connection pool scoped strictly to one HTTP/SSE request."""
-
-    def __init__(self, app: Any) -> None:
-        self.app = app
-
-    async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
-        if not IS_VERCEL or _custom_reconfigured or scope.get("type") != "http":
-            await self.app(scope, receive, send)
-            return
-
-        box: Dict[str, Any] = {"engine": None, "maker": None}
-        tok = _request_scope_var.set(box)
-        try:
-            await self.app(scope, receive, send)
-        finally:
-            _request_scope_var.reset(tok)
-            req_eng: Optional[AsyncEngine] = box.get("engine")
-            if req_eng is not None:
-                try:
-                    await req_eng.dispose()
-                except Exception:
-                    pass
 
 
 def reconfigure_database(database_url: str) -> None:
     """Rebind engine and session maker (used in isolated tests or runtime overrides)."""
-    global engine, AsyncSessionLocal, _custom_reconfigured, _schema_verified
-    _custom_reconfigured = True
+    global engine, AsyncSessionLocal, _schema_verified
     _schema_verified = False
     engine = build_engine(database_url)
     AsyncSessionLocal = async_sessionmaker(
@@ -154,22 +110,7 @@ def reconfigure_database(database_url: str) -> None:
 
 
 def open_session() -> AsyncSession:
-    """Open an AsyncSession reusing the request-scoped connection pool on serverless."""
-    if IS_VERCEL and not _custom_reconfigured:
-        box = _request_scope_var.get()
-        if box is not None:
-            maker = box.get("maker")
-            if maker is None:
-                req_eng = build_engine(request_scoped_pool=True)
-                maker = async_sessionmaker(
-                    bind=req_eng,
-                    class_=AsyncSession,
-                    expire_on_commit=False,
-                    autoflush=False,
-                )
-                box["engine"] = req_eng
-                box["maker"] = maker
-            return maker()
+    """Always open a session from the active `AsyncSessionLocal` factory."""
     return AsyncSessionLocal()
 
 
